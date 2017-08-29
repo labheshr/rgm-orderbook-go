@@ -7,9 +7,10 @@ import (
 	"log"
 	"bufio"
 	"strconv"
-	"container/heap"
 	"strings"
 	"math"
+	"github.com/emirpasic/gods/sets/treeset"
+	"flag"
 )
 
 type AddOrder struct {
@@ -18,175 +19,259 @@ type AddOrder struct {
 	orderId string
 	side string
 	price float64
-	size uint64
-	index int //index of item in the heap
-	usedSize uint64
-	unusedSize uint64
+	size int
+	usedSize int
 }
 
-type BidHeap []*AddOrder
+func byPriceDescQtyTieBreaker(a, b interface{}) int {
 
-type AskHeap []*AddOrder
+	// Type assertion, program will panic if this is not respected
+	c1 := a.(AddOrder)
+	c2 := b.(AddOrder)
 
-//TODO:LR: how do we not repeat code for BidHeap and AskHeap? They just differ in implmentation of "Less" functionality
-func (pq BidHeap) Len() int { return len(pq) }
+	switch {
+	case c1.price == c2.price && c1.size > c2.size:
+		return -1
+	case c1.price == c2.price && c1.size < c2.size:
+		return 1
+	case c1.price > c2.price:
+		return -1
+	case c1.price < c2.price:
+		return 1
+	default:
+		return 0
+	}
 
-func (pq BidHeap) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-	pq[i].index = i
-	pq[j].index = j
 }
 
-func (pq *BidHeap) Push(x interface{}) {
-	n := len(*pq)
-	item := x.(*AddOrder)
-	item.index = n
-	*pq = append(*pq, item)
-}
+func byPriceAscQtyTieBreaker(a, b interface{}) int {
 
-func (pq *BidHeap) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	item.index = -1 // for safety
-	*pq = old[0 : n-1]
-	return item
-}
+	// Type assertion, program will panic if this is not respected
+	c1 := a.(AddOrder)
+	c2 := b.(AddOrder)
 
-func (pq BidHeap) Less(i, j int) bool {
-	// We want Pop to give us the highest, not lowest, priority so we use greater than here.
-	return pq[i].price > pq[j].price
-}
+	switch {
+	case c1.price == c2.price && c1.size > c2.size:
+		return -1
+	case c1.price == c2.price && c1.size < c2.size:
+		return 1
+	case c1.price > c2.price:
+		return 1
+	case c1.price < c2.price:
+		return -1
+	default:
+		return 0
+	}
 
-func (pq AskHeap) Len() int { return len(pq) }
-
-func (pq AskHeap) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-	pq[i].index = i
-	pq[j].index = j
-}
-
-func (pq *AskHeap) Push(x interface{}) {
-	n := len(*pq)
-	item := x.(*AddOrder)
-	item.index = n
-	*pq = append(*pq, item)
-}
-
-func (pq *AskHeap) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	item.index = -1 // for safety
-	*pq = old[0 : n-1]
-	return item
-}
-
-func (pq AskHeap) Less(i, j int) bool {
-	return pq[i].price < pq[j].price
 }
 
 var (
-	totalBidQty, totalAskQty uint64 = 0, 0
-	income, expense float64 = 0, 0
-	//usedOrders map[string]AddOrder
-	usedOrders = make(map[string]AddOrder)
-	bidIdx, askIdx int = 0, 0
+	targetSize int = 0
+	totalBidQty, totalAskQty int = 0, 0
+	currInc, currExp float64 = 0, 0
+	isCurrIncNA, isCurrExpNA bool = false, false
+	addOrdersById = make(map[string]*AddOrder)
+	bidSet = treeset.NewWith(byPriceDescQtyTieBreaker)
+	askSet = treeset.NewWith(byPriceAscQtyTieBreaker)
 )
 
 func printOutput(timestamp uint64, side string, proceeds float64, isProceedsNA bool) {
 
 	if !isProceedsNA {
-		fmt.Printf("%d, %s, %f\n", timestamp, side, proceeds)
+		fmt.Printf("%d %s %.2f\n", timestamp, side, proceeds)
 	} else {
-		fmt.Printf("%d, %s, %s\n", timestamp, side, "NA")
+		fmt.Printf("%d %s %s\n", timestamp, side, "NA")
 	}
 
 }
 
-func processOrder(line string, bidHeap *BidHeap, askHeap *AskHeap, targetSize uint64) {
+func processOrder(line string) {
 
 	order := strings.Fields(line)
 	if len(order) < 3 {
 		log.Fatal("Order is not in the right format; must contain atleast timestamp, order type and order id")
 	}
+	orderType := order[1]
+	if orderType == "A" {
+		processAddOrder(order)
+	} else if orderType == "R" {
+		processReduceOrder(order)
+	} else {
+		log.Fatal("Order type not supported , must be (A)dd, or (R)educe")
+	}
+	//fmt.Printf("Order: %s, totalAskQty: %d, totalBidQty: %d\n", line, totalAskQty, totalBidQty)
+}
+
+func processAddOrder(order[] string) {
+
 	timestamp, _ := strconv.ParseUint(order[0], 10, 64)
 	orderType := order[1]
 	orderId := order[2]
-	if orderType == "A" {
-		side := order[3]
-		price, _ := strconv.ParseFloat(order[4], 64)
-		size, _ := strconv.ParseUint(order[5], 10, 64)
-		if side == "B" {
-			ao := AddOrder{timestamp, orderType, orderId, side, price, size, askIdx, 0, size}
-			totalAskQty += size
-			heap.Push(bidHeap, &ao)
-			askIdx++
-			if totalAskQty >= targetSize {
-				askQtyToReduce := targetSize
-				proceeds := 0.
-				for askQtyToReduce > 0 {
-					if bidHeap.Len() > 0 {
-						currAO := *(heap.Pop(bidHeap).(*AddOrder))
-						usedSize := math.Min(float64(askQtyToReduce), float64(ao.unusedSize))
-						askQtyToReduce -= uint64(usedSize)
-						proceeds += currAO.price * usedSize
-						currAO.usedSize = uint64(usedSize)
-						currAO.unusedSize = currAO.size - uint64(usedSize)
-						usedOrders[currAO.orderId] = currAO //we used this order to compute the proceeds
-						//do we have to reinsert the remaining quantity back into the heap, if we don't fully exhaust it?
-					} else {
-						break
-					}
-				}
-				if askQtyToReduce == 0 {
-					printOutput(timestamp, "S", proceeds, false)
-				}
-			}
+	side := order[3]
+	price, _ := strconv.ParseFloat(order[4], 64)
+	size, _ := strconv.Atoi(order[5])
+	//create add order and insert into the right heap
+	if side == "B" {
+		ao := AddOrder{timestamp, orderType, orderId, side, price, size,0}
+		bidSet.Add(ao)
+		addOrdersById[orderId] = &ao
+		computeIncomeAndDoUpdates(size, timestamp)
 
-		} else if side == "S" { //lot of repeat code between B and S...make it DRY
-			ao := AddOrder{timestamp, orderType, orderId, side, price, size, bidIdx, 0, size}
-			totalBidQty += size
-			heap.Push(askHeap, &ao)
-			bidIdx++
-			if totalBidQty >= targetSize {
-				bidQtyToReduce := totalBidQty
-				proceeds := 0.
-				for bidQtyToReduce > 0 {
-					if askHeap.Len() > 0 {
-						currAO := *(heap.Pop(askHeap).(*AddOrder))
-						proceeds += currAO.price * float64(currAO.size)
-						bidQtyToReduce -= targetSize
-						usedOrders[currAO.orderId] = currAO
-					} else {
-						break
-					}
-				}
-				if bidQtyToReduce == 0 {
-					printOutput(timestamp, "B", proceeds, false)
-				}
-			}
-		}
-
-	} else if orderType == "R" {
-		if aoToReduce, ok := usedOrders[orderId]; ok {
-			sizeToReduceBy, _ := strconv.ParseUint(order[3], 10, 64)
-			if sizeToReduceBy > aoToReduce.unusedSize {
-				side := aoToReduce.side
-				if side == "B" {
-					totalAskQty -= aoToReduce.usedSize
-					printOutput(timestamp, side, 0, true)
-				} else if side == "S" {
-					totalBidQty -= aoToReduce.usedSize
-					printOutput(timestamp, side, 0, true)
-				}
-
-			}
-		}
-
+	} else { //"S"
+		ao := AddOrder{timestamp, orderType, orderId, side, price, size, 0}
+		askSet.Add(ao)
+		//fmt.Println(askSet)
+		addOrdersById[orderId] = &ao
+		computeExpenseAndDoUpdates(size, timestamp)
 	}
 
 }
+
+func computeIncomeAndDoUpdates(size int, timestamp uint64) {
+	if totalAskQty < targetSize {
+		totalAskQty += size
+	}
+
+	if totalAskQty >= targetSize {
+		askQtyToReduce := targetSize
+		proceeds := 0.
+		it := bidSet.Iterator()
+		for askQtyToReduce > 0 && it.Next() {
+			currAO := it.Value().(AddOrder)
+			if currAO.size > 0 {
+				usedSize := int(math.Min(float64(askQtyToReduce), float64(currAO.size)))
+				askQtyToReduce -= usedSize
+				proceeds += currAO.price * float64(usedSize)
+				currAO.usedSize = usedSize
+				//the map has the pointer to AddOrder...so this object is maintained in its current state in the map
+				currMapAO := addOrdersById[currAO.orderId]
+				currMapAO.usedSize = currAO.usedSize
+			}
+		}
+		if askQtyToReduce == 0 {
+			printOutput(timestamp, "S", proceeds, false)
+			currInc = proceeds
+			isCurrIncNA = false
+		}
+	}
+}
+
+func computeExpenseAndDoUpdates(size int, timestamp uint64) {
+	if totalBidQty < targetSize {
+		totalBidQty += size
+	}
+	if totalBidQty >= targetSize {
+		bidQtyToReduce := targetSize
+		proceeds := 0.
+		it := askSet.Iterator()
+		for bidQtyToReduce > 0 && it.Next() {
+			currAO := it.Value().(AddOrder)
+			if currAO.size > 0 {
+				usedSize := int(math.Min(float64(bidQtyToReduce), float64(currAO.size)))
+				bidQtyToReduce -= usedSize
+				proceeds += currAO.price * float64(usedSize)
+				currAO.usedSize = usedSize
+				currMapAO := addOrdersById[currAO.orderId]
+				currMapAO.usedSize = currAO.usedSize
+			}
+		}
+		if bidQtyToReduce == 0 {
+			printOutput(timestamp, "B", proceeds, false)
+			currExp = proceeds
+			isCurrExpNA = false
+		}
+	}
+}
+
+func processReduceOrder(order[] string) {
+
+	timestamp, _ := strconv.ParseUint(order[0], 10, 64)
+	orderId := order[2]
+
+	if aoToReduce, ok := addOrdersById[orderId]; ok {
+		sizeToReduceBy, _ := strconv.Atoi(order[3])
+		newSize := int(math.Max(float64(aoToReduce.size)-float64(sizeToReduceBy),0))
+		side := aoToReduce.side
+		if side == "B" {
+			if aoToReduce.usedSize > 0 {//we used this entry
+				if aoToReduce.usedSize <= newSize {
+					aoToReduce.size = newSize
+				} else {
+					//new size was lower than the used size, so we need to decrease total qty and set the proceeds to NA
+					totalAskQty -= sizeToReduceBy
+					totalAskQty = int(math.Max(float64(totalAskQty), 0))//never let this go below 0
+					if newSize == 0 {
+						bidSet.Remove(*aoToReduce) //will this work? esp that the size is changing?
+					} else {
+						bidSet.Remove(*aoToReduce)
+						aoToReduce.size = newSize
+						aoToReduce.usedSize = 0
+						bidSet.Add(*aoToReduce)
+					}
+					remainingSizeInBidHeap := 0
+					it := bidSet.Iterator()
+					for it.Next() {
+						remainingSizeInBidHeap += it.Value().(AddOrder).size
+					}
+					if !isCurrIncNA && remainingSizeInBidHeap < targetSize {
+						printOutput(timestamp, "S", 0, true)
+						isCurrIncNA = true
+					}else {
+						computeIncomeAndDoUpdates(remainingSizeInBidHeap, timestamp)
+					}
+				}
+			} else {
+				if totalAskQty < targetSize {
+					totalAskQty -= sizeToReduceBy
+				}
+				bidSet.Remove(*aoToReduce)
+				//aoToReduce.size = newSize
+				//aoToReduce.usedSize = 0
+			}
+		} else {
+			//side == "S"
+			if aoToReduce.usedSize > 0 {//we used this entry
+				if aoToReduce.usedSize <= newSize {
+					aoToReduce.size = newSize
+				} else {
+					//new size was lower than the used size, so we need to decrease total qty and set the proceeds to NA
+					totalBidQty -= sizeToReduceBy
+					totalBidQty = int(math.Max(float64(totalBidQty), 0))//never let this go below 0
+					if newSize == 0 {
+						askSet.Remove(*aoToReduce)
+					} else {
+						//the sets no longer carry references...for clean soln, remove the current order and insert a new one
+						askSet.Remove(*aoToReduce)
+						aoToReduce.size = newSize
+						aoToReduce.usedSize = 0
+						askSet.Add(*aoToReduce)
+					}
+					remainingSizeInAskHeap := 0
+					it := askSet.Iterator()
+					for it.Next() {
+						remainingSizeInAskHeap += it.Value().(AddOrder).size
+					}
+					if !isCurrExpNA && remainingSizeInAskHeap < targetSize  {
+						printOutput(timestamp, "B", 0, true)
+						isCurrExpNA = true
+					} else {
+						computeExpenseAndDoUpdates(remainingSizeInAskHeap, timestamp)
+					}
+				}
+			} else {
+				if totalBidQty < targetSize {
+					totalBidQty -= sizeToReduceBy
+				}
+				askSet.Remove(*aoToReduce)
+				//aoToReduce.size = newSize
+				//aoToReduce.usedSize = 0
+
+			}
+		}
+	}
+
+}
+
 
 func readLineFromFile(filename string) (c chan string){
 
@@ -198,7 +283,6 @@ func readLineFromFile(filename string) (c chan string){
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Fatal(err)
-			//close(c) //TODO:LR: do we need to close channel here or does defer close(c) below still fine?
 		}
 		defer file.Close()
 
@@ -218,17 +302,11 @@ func readLineFromFile(filename string) (c chan string){
 
 func main() {
 
-	//targetSizePtr := flag.Uint("targetsize", 0, "target size of shares bought or sold")
-	//flag.Parse()
-	//var targetSize = *targetSizePtr
-	var targetSize = 200
-
-	bidHeap := make(BidHeap, 0)
-	heap.Init(&bidHeap)
-	askHeap := make(AskHeap, 0)
-	heap.Init(&askHeap)
-
+	targetSizePtr := flag.Int("targetsize", 0, "target size of shares bought or sold")
+	flag.Parse()
+	targetSize = *targetSizePtr
+	//targetSize = 200
 	for line := range readLineFromFile("/Users/Labhesh/GoglandProjects/src/rgm_orderbook/log.txt") {
-		processOrder(line, &bidHeap, &askHeap, uint64(targetSize))
+		processOrder(line)
 	}
 }
